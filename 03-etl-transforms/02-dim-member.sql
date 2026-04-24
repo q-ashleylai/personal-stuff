@@ -1,46 +1,67 @@
 -- ============================================================
 -- ETL Step 2: dim_member
 -- Full refresh: truncate and reload daily
--- Dependencies: None (reads from raw only)
+-- Source: raw.pco_users + raw.pco_group_membership + raw.pco_groups
+-- Dependencies: sem.dim_congregation (seed data)
 -- ============================================================
 
-TRUNCATE TABLE analytics.dim_member;
+TRUNCATE TABLE sem.dim_member CASCADE;
 
-INSERT INTO analytics.dim_member
+INSERT INTO sem.dim_member (
+    member_key, full_name, first_name, last_name, gender,
+    age_group, membership, user_role, is_baptized,
+    congregation_key, user_status, created_at
+)
 SELECT
-    m.member_id                        AS member_key,
-    m.first_name,
-    m.last_name,
-    CONCAT(m.first_name, ' ', m.last_name) AS full_name,
-    m.gender,
-    m.date_of_birth,
+    u.user_id AS member_key,
+    CONCAT(u.user_first_name, ' ', u.user_last_name) AS full_name,
+    u.user_first_name AS first_name,
+    u.user_last_name AS last_name,
+    u.user_gender AS gender,
+
     CASE
-        WHEN TIMESTAMPDIFF(YEAR, m.date_of_birth, CURDATE()) < 13 THEN 'Child (0-12)'
-        WHEN TIMESTAMPDIFF(YEAR, m.date_of_birth, CURDATE()) < 18 THEN 'Teen (13-17)'
-        WHEN TIMESTAMPDIFF(YEAR, m.date_of_birth, CURDATE()) < 30 THEN 'Young Adult (18-29)'
-        WHEN TIMESTAMPDIFF(YEAR, m.date_of_birth, CURDATE()) < 50 THEN 'Adult (30-49)'
-        ELSE 'Senior (50+)'
-    END                                AS age_group,
-    m.join_date,
-    m.membership_status,
-    m.campus,
-    COALESCE(eng.ministry_count, 0)    AS ministry_count,
-    COALESCE(eng.cell_group_count, 0)  AS cell_group_count,
+        WHEN u.user_birthdate IS NULL THEN NULL
+        WHEN EXTRACT(YEAR FROM AGE(CURRENT_DATE, u.user_birthdate::DATE)) < 13 THEN '12 and below'
+        WHEN EXTRACT(YEAR FROM AGE(CURRENT_DATE, u.user_birthdate::DATE)) < 18 THEN '13 - 17'
+        WHEN EXTRACT(YEAR FROM AGE(CURRENT_DATE, u.user_birthdate::DATE)) < 24 THEN '18 - 23'
+        WHEN EXTRACT(YEAR FROM AGE(CURRENT_DATE, u.user_birthdate::DATE)) < 36 THEN '24 - 35'
+        WHEN EXTRACT(YEAR FROM AGE(CURRENT_DATE, u.user_birthdate::DATE)) < 51 THEN '36 - 50'
+        ELSE '66 and above'
+    END AS age_group,
+
+    u.user_membership AS membership,
+    u.user_role AS user_role,
+
     CASE
-        WHEN COALESCE(eng.ministry_count, 0) + COALESCE(eng.cell_group_count, 0) = 0 THEN 'Not Connected'
-        WHEN COALESCE(eng.ministry_count, 0) + COALESCE(eng.cell_group_count, 0) = 1 THEN 'Lightly Connected'
-        ELSE 'Well Connected'
-    END                                AS connection_level
-FROM raw.members m
+        WHEN u.user_baptized IS NOT NULL
+             AND u.user_baptized NOT IN ('', ' ')
+        THEN TRUE
+        ELSE FALSE
+    END AS is_baptized,
+
+    -- Derive congregation from the user's primary CG group tag
+    CASE
+        WHEN cg.grp_tag_congregation LIKE 'EN%' THEN 1
+        WHEN cg.grp_tag_congregation LIKE 'BM%' THEN 2
+        WHEN cg.grp_tag_congregation LIKE 'CN%' THEN 3
+        WHEN cg.grp_tag_congregation LIKE 'MM%' THEN 4
+        WHEN cg.grp_tag_congregation LIKE 'NP%' THEN 5
+        WHEN cg.grp_tag_congregation LIKE 'TM%' THEN 6
+        WHEN cg.grp_tag_congregation LIKE 'FP%' THEN 7
+        ELSE NULL
+    END AS congregation_key,
+
+    u.user_status,
+    u.user_created_at AS created_at
+
+FROM raw.pco_users u
 LEFT JOIN (
-    SELECT
-        mb.member_id,
-        COUNT(DISTINCT mm.ministry_id)  AS ministry_count,
-        COUNT(DISTINCT cgm.group_id)    AS cell_group_count
-    FROM raw.members mb
-    LEFT JOIN raw.ministry_members mm
-        ON mb.member_id = mm.member_id AND mm.left_date IS NULL
-    LEFT JOIN raw.cell_group_members cgm
-        ON mb.member_id = cgm.member_id AND cgm.left_date IS NULL
-    GROUP BY mb.member_id
-) eng ON m.member_id = eng.member_id;
+    -- Get the user's primary CG membership (most recent join)
+    SELECT DISTINCT ON (gm.member_user_key)
+        gm.member_user_key,
+        g.grp_tag_congregation
+    FROM raw.pco_group_membership gm
+    JOIN raw.pco_groups g ON gm.member_grp_key = g.grp_id
+    WHERE g.grp_type_key = 137505  -- Cell Groups only
+    ORDER BY gm.member_user_key, gm.member_joined_date DESC
+) cg ON u.user_id = cg.member_user_key;

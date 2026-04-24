@@ -18,11 +18,21 @@ Add to crontab on your ECS instance:
 ### Execution Order
 
 ```
-[01-dim-date] ────────┐
-[02-dim-member] ──────┤
-[03-dim-congregation] ─┼──→ [05-fact-attendance] ──→ [validation]
-[04-dim-ministry] ────┤──→ [06-fact-member-engagement] ──→ [validation]
-                      └─────────────────────────────────────┘
+DIMENSIONS (no dependencies between them):
+[01-dim-date] ─────────┐
+[02-dim-member] ────────┤
+[03-dim-cell-group] ────┤
+dim_congregation ───────┤  (seed data — no daily ETL)
+                        │
+FACTS (depend on dimensions):
+                        ├──→ [04-fact-cg-attendance]
+                        ├──→ [05-fact-cg-submission]
+                        ├──→ [06-fact-decisions]
+                        ├──→ [07-fact-discipleship]
+                        ├──→ [08-fact-celebration-attendance]
+                        ├──→ [09-fact-serving]
+                        │
+                        └──→ [99-validation]
 ```
 
 Dimensions run first (can be parallel), then facts (depend on dimensions), then validation.
@@ -31,28 +41,30 @@ Dimensions run first (can be parallel), then facts (depend on dimensions), then 
 
 On failure, the shell script logs the error and can optionally send an email alert.
 
-### MySQL Connection
+### PostgreSQL Connection
 
-The script connects to RDS using:
-- **Host**: Your RDS endpoint (e.g., `rm-xxxxx.mysql.rds.aliyuncs.com`)
-- **Port**: 3306
-- **User**: ETL user with read on `raw`, read/write on `analytics`
+The script connects to RDS (PostgreSQL) using:
+- **Host**: Your RDS endpoint (e.g., `pgm-xxxxx.pg.rds.aliyuncs.com`)
+- **Port**: 5432
+- **Database**: `church_analytics`
+- **User**: ETL user with read on `raw`, read/write on `sem`
 
 ```sql
 -- Create ETL user
-CREATE USER 'etl_runner'@'%' IDENTIFIED BY '<strong-password>';
-GRANT SELECT ON raw.* TO 'etl_runner'@'%';
-GRANT SELECT, INSERT, DELETE, DROP, CREATE ON analytics.* TO 'etl_runner'@'%';
-FLUSH PRIVILEGES;
+CREATE USER etl_runner WITH PASSWORD '<strong-password>';
+GRANT USAGE ON SCHEMA raw TO etl_runner;
+GRANT SELECT ON ALL TABLES IN SCHEMA raw TO etl_runner;
+GRANT USAGE, CREATE ON SCHEMA sem TO etl_runner;
+GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON ALL TABLES IN SCHEMA sem TO etl_runner;
 ```
 
 ### BI Tool Connection (read-only)
 
 ```sql
 -- Create read-only BI user
-CREATE USER 'bi_reader'@'%' IDENTIFIED BY '<strong-password>';
-GRANT SELECT ON analytics.* TO 'bi_reader'@'%';
-FLUSH PRIVILEGES;
+CREATE USER bi_reader WITH PASSWORD '<strong-password>';
+GRANT USAGE ON SCHEMA sem TO bi_reader;
+GRANT SELECT ON ALL TABLES IN SCHEMA sem TO bi_reader;
 ```
 
 ## Future Consideration
